@@ -21,11 +21,9 @@ def process_csv(input_file, output_file):
             value = float(row[min_value_index])
 
             if key in unique_records:
-                # 如果记录已存在，只保留最小值
                 if value < int(unique_records[key][min_value_index]):
                     unique_records[key] = row
             else:
-                # 如果记录不存在，添加到字典中
                 unique_records[key] = row
 
     with open(output_file, 'w', newline='') as file:
@@ -33,7 +31,7 @@ def process_csv(input_file, output_file):
         writer.writerow(header)  # 写入标题行
         writer.writerows(unique_records.values())  # 写入唯一记录的值
 
-    print("处理完成！输出文件为:", output_file)
+    print("output:", output_file)
 
 # 示例用法
 input_file = 'input.csv'

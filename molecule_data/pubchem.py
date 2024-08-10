@@ -4,6 +4,7 @@
 # @OriginalFileName: pubchem
 # @Software: PyCharm
 # @AIMedicineWebPage: https://www.ilovemyhome.cc
+# @Description: Fetch molecule details from PubChem
 
 import urllib
 
