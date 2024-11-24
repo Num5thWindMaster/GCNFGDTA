@@ -1,9 +1,12 @@
+import copy
 import os
 import pickle
+import random
 
 import numpy as np
 from math import sqrt
 
+import pandas as pd
 import sklearn
 from matplotlib import pyplot as plt
 from rdkit import Chem
@@ -14,16 +17,20 @@ from torch import nn, Tensor
 from torch_geometric.data import InMemoryDataset, DataLoader
 from torch_geometric import data as DATA
 import torch
+from concurrent.futures import ThreadPoolExecutor
 
+
+BINDINGDB_THRESHOLD_REVERSE = 16
+
+fg_dict = None
 
 class TestbedDataset(InMemoryDataset):
-    def __init__(self, root='/tmp', dataset='davis',
+    def __init__(self, root='/tmp', dataset='kiba',
                  xd=None, xt=None, y=None, transform=None,
                  pre_transform=None, smile_graph=None, pred=False):
 
         # root is required for save preprocessed data, default is '/tmp'
         super(TestbedDataset, self).__init__(root, transform, pre_transform)
-        # benchmark dataset, default = 'davis'
         self.dataset = dataset
         if os.path.isfile(self.processed_paths[0]) and not pred:
             print('Pre-processed data found: {}, loading ...'.format(self.processed_paths[0]))
@@ -73,6 +80,10 @@ class TestbedDataset(InMemoryDataset):
             labels = y[i]
             # convert SMILES to molecular representation using rdkit
             c_size, features, edge_index = smile_graph[smiles]
+
+            if len(edge_index) == 0:
+                edge_index = torch.empty((2, 0), dtype=torch.long)  # 空边索引，形状为 (2, 0)
+
             # make the graph ready for PyTorch Geometrics GCN algorithms:
             GCNData = DATA.Data(x=torch.Tensor(features),
                                 edge_index=torch.LongTensor(edge_index).transpose(1, 0),
@@ -94,6 +105,8 @@ class TestbedDataset(InMemoryDataset):
         torch.save((data, slices), self.processed_paths[0])
 
 
+
+
 def rmse(y, f):
     rmse = sqrt(((y - f) ** 2).mean(axis=0))
     return rmse
@@ -113,29 +126,52 @@ def spearman(y, f):
     rs = stats.spearmanr(y, f)[0]
     return rs
 
+# calculate ci
+# def ci(y, f):
+#     ind = np.argsort(y)
+#     y = y[ind]
+#     f = f[ind]
+#     i = len(y) - 1
+#     j = i - 1
+#     z = 0.0
+#     S = 0.0
+#     while i > 0:
+#         while j >= 0:
+#             if y[i] > y[j]:
+#                 z = z + 1
+#                 u = f[i] - f[j]
+#                 if u > 0:
+#                     S = S + 1
+#                 elif u == 0:
+#                     S = S + 0.5
+#             j = j - 1
+#         i = i - 1
+#         j = i - 1
+#     ci = S / z
+#     return ci
 
-def ci(y, f):
-    ind = np.argsort(y)
-    y = y[ind]
-    f = f[ind]
-    i = len(y) - 1
-    j = i - 1
-    z = 0.0
-    S = 0.0
-    while i > 0:
-        while j >= 0:
-            if y[i] > y[j]:
-                z = z + 1
-                u = f[i] - f[j]
-                if u > 0:
-                    S = S + 1
-                elif u == 0:
-                    S = S + 0.5
-            j = j - 1
-        i = i - 1
-        j = i - 1
-    ci = S / z
-    return ci
+
+# calculate ci using GPU, if not necessary, using normal ci behind instead.
+def ci(y, f, device=torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")):
+    # 将数据转换为 GPU 张量
+    y = torch.tensor(y, device=device)
+    f = torch.tensor(f, device=device)
+
+    indices = torch.argsort(y)
+    y = y[indices]
+    f = f[indices]
+
+    diff_y = y.view(-1, 1) - y.view(1, -1)  # y[i] - y[j]
+    diff_f = f.view(-1, 1) - f.view(1, -1)  # f[i] - f[j]
+
+    valid_pairs = diff_y > 0  # 只保留 y[i] > y[j]
+    total_pairs = torch.sum(valid_pairs)
+
+    concordant = torch.sum((diff_f > 0) & valid_pairs)  # 一致对
+    ties = torch.sum((diff_f == 0) & valid_pairs)       # ties 对
+
+    ci = (concordant + 0.5 * ties) / total_pairs if total_pairs > 0 else 0.0
+    return ci.item()  # 返回标量值
 
 
 def auc(y, f):
@@ -170,17 +206,17 @@ def rm_2_score(y_true, y_pred):
     return r2 * (1 - np.sqrt(np.abs(r2 - r0_2)))
 
 
-def aupr_std(y, f, threshold):
+def aupr_std(y, f, threshold, dataset):
+    if dataset == 'bindingdb':
+        y = BINDINGDB_THRESHOLD_REVERSE - y
+        f = BINDINGDB_THRESHOLD_REVERSE - f
     y_bin_true = np.where(y >= threshold, 1, 0)
     ap = average_precision_score(y_bin_true, f)
-    # 重复计算多个预测结果的平均精确度和标准差
-    n_iterations = 100  # 进行100次重复计算
+    n_iterations = 100
     ap_values = np.zeros(n_iterations)
 
     for i in range(n_iterations):
-        # 生成随机的预测结果
         random_pred = np.random.rand(len(y_bin_true))
-        # 计算平均精确度
         ap_values[i] = average_precision_score(y_bin_true, random_pred)
 
     return ap, np.std(ap_values)
@@ -203,33 +239,6 @@ def plot_auroc(y, f, threshold):
     plt.show()
 
 
-def load_embedding_from_pkl(path):
-    # 读取包含键值对的文件
-    # embedding_dict = {}
-    # with open(path, "r") as file:
-    #     for line in file:
-    #         key, *value = line.split()  # 假设每行的格式为 "key value1 value2 ..."
-    #         embedding_dict[key] = np.array([float(val) for val in value])
-    embedding_dict = pickle.load(open(path, 'rb'))
-    # 从embedding_dict中获取词汇表大小和嵌入维度
-    num_embeddings = len(embedding_dict)
-
-    # embedding_dim = len(embedding_dict.values())
-    embedding_dim = len(next(iter(embedding_dict.values())))
-
-    # 创建嵌入层对象，并加载权重
-    embedding_layer = nn.Embedding(num_embeddings, embedding_dim)
-    for idx, (key, value) in enumerate(embedding_dict.items()):
-        embedding_layer.weight.data[idx] = torch.tensor(value).to('cpu')
-
-    # 冻结权重
-    embedding_layer.weight.requires_grad = False
-    return embedding_layer
-    # 示例：使用嵌入层将索引为0的词汇转换为嵌入向量
-    # index_tensor = torch.tensor([0])  # 假设将索引为0的词汇转换为嵌入向量
-    # embedded_vector = embedding_layer(index_tensor)
-    #
-    # print(embedded_vector)
 
 
 def match_fg(mol: Mol):
@@ -250,25 +259,89 @@ def match_fg(mol: Mol):
         fg_emb.extend(pad_fg * (13 - len(fg_emb)))
     return fg_emb
 
-
 def calculate_fg(self, data, device):
+    # fg_dict was set as global variable
+    global fg_dict
+    fg_path = "fgp/" + self.dataset + "_fg.pt"
+    if os.path.exists(fg_path) and fg_dict is None:
+        fg_dict = torch.load(fg_path)
+    elif not os.path.exists(fg_path):
+        os.makedirs("fgp", exist_ok=True)
+        train_data_path = "data/processed/" + self.dataset + "_train.pt"
+        test_data_path = "data/processed/" + self.dataset + "_test.pt"
+
+        # load dataset from .pt
+        train_data, _ = torch.load(train_data_path)
+        test_data, _ = torch.load(test_data_path)
+
+        # derive SMILES list
+        # train_smiles = train_data.smiles
+        # test_smiles = test_data.smiles
+        smiles_list = train_data.smiles + test_data.smiles
+
+        # construct fg_dict
+        fg_dict = {}
+        smiles_set = set(smiles_list)
+        for smile in smiles_set:
+            smiles_set.add(smile)
+            mol = MolFromSmiles(smile)
+            emb = match_fg(mol)  # 自定义方法，匹配功能基团
+            fg_dict[smile] = emb
+
+        # save to fg.pt
+        torch.save(fg_dict, fg_path)
+
+    # address input data
     smiles = data.smiles
     embs = []
-    for smile in smiles:
-        mol = MolFromSmiles(smile)
-        emb = match_fg(mol)
-        embs.extend(emb)
-    embs = Tensor(embs)
-    embs = embs.to(device)
+    fg_index = []
+    fg_indxs = []
 
+    keys = set(fg_dict.keys())
+    for smile in smiles:
+        if smile in keys:
+            emb = fg_dict[smile]
+            embs.extend(emb)
+    embs = Tensor(embs).to(device)
     fg_index = [i * 13 for i in range(len(smiles))]
     fg_indxs = [[i] * 133 for i in fg_index]
-    fg_indxs = torch.LongTensor(fg_indxs)
-    fg_indxs = fg_indxs.to(device)
-    # if torch.cuda.is_available():
-    #     fg_indxs = fg_indxs.cuda(device)
-    #     embs = embs.cuda(device)
+    fg_indxs = torch.LongTensor(fg_indxs).to(device)
 
+    ## loop finish
     output_fg = self.prompt(embs, fg_indxs)
     output_fg = self.fg_out_linear(output_fg)
     return output_fg
+
+def compute_validation_metrics_parallel(G, P, threshold, dataset):
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        # define task list
+        tasks = {
+            # "rmse": executor.submit(rmse, G, P),
+            "mse": executor.submit(mse, G, P),
+            "pearson": executor.submit(pearson, G, P),
+            "spearman": executor.submit(spearman, G, P),
+            # "ci": executor.submit(ci, G, P),//calculate ci will slow the training when dataset contains too many items
+            "aupr_std": executor.submit(aupr_std, G, P, threshold, dataset),
+            "cal_r2_score": executor.submit(cal_r2_score, G, P),
+        }
+
+        # 收集结果
+        results = {}
+        for name, future in tasks.items():
+            try:
+                results[name] = future.result()
+            except Exception as e:
+                results[name] = f"Error: {e}"
+
+    return [
+        # results["rmse"],
+        None,
+        results["mse"],
+        results["pearson"],
+        results["spearman"],
+        # results["ci"],
+        None,
+        results["aupr_std"],
+        results["cal_r2_score"],
+    ]
+

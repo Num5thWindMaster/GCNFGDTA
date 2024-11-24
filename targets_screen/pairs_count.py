@@ -8,8 +8,8 @@
 import json
 
 
-def count_pn_kiba_num():
-    with open("./davis-kiba/kiba.txt", 'r', encoding='utf-8') as f:
+def count_pn_kiba_num(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
         print(len(lines))
         count = 0

@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2024/5/1 15:18
-# @Author  : HaiqingSun
-# @OriginalFileName: predicting
-# @Software: PyCharm
-# @AIMedicineWebPage: https://www.ilovemyhome.cc
 import numpy as np
 import torch
 import sys
@@ -17,7 +11,7 @@ from models.gcn import GCNNet, GCNFG
 from models.ginconv import GINConvNet, GINFG
 from utils import TestbedDataset
 
-dataset = ['kiba'][int(sys.argv[1])]
+dataset = ['kiba', 'bindingdb'][int(sys.argv[1])]
 modeling = [GINConvNet, GATNet, GAT_GCN, GCNNet, GINFG, GATFG, GATGCNFG, GCNFG][int(sys.argv[2])]
 model_st = modeling.__name__
 model_file_name = 'model_' + model_st + '_' + dataset + '.model'
@@ -48,9 +42,9 @@ XT = [seq_cat(t) for t in xt]
 xt = np.asarray(XT)
 y = np.asarray(y)
 
-# DAVIS_THRESHOLD = 7.0
-# KIBA_THRESHOLD = 12.1
-threshold = 12.1
+KIBA_THRESHOLD = 12.1
+BINDINGDB_THRESHOLD = 8.0
+threshold = [KIBA_THRESHOLD, BINDINGDB_THRESHOLD][int(sys.argv[1])]
 
 test_data = TestbedDataset(root='test', dataset='kiba', xd=xd, xt=xt, y=y, smile_graph=smile_graph, pred=True)
 test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False)

@@ -1,18 +1,31 @@
 # Resources
 ## KIBA dataset:
 Please jump to https://doi.org/10.1021/ci400709d in order to get KIBA dataset.
+## BindingDB dataset:
+Please jump to https://www.bindingdb.org/rwd/bind/chemsearch/marvin/SDFdownload.jsp?download_file=/bind/downloads/BindingDB_ChEMBL_202411_tsv.zip to download BindingDB dataset.
 ## Compounds of _Cyperus esculentus_
 We provide CAS Number of each compound. Please refer to molecule_data/CAS_name.txt
 
 ## Source codes:
 initial/get_dict.py: Match function groups from pre-trained model and transfer to embedding weights of function groups.
-models/ : including stem models and the function group enhance model.
-targets_screen/ : including molecule screening tool scripts.
-predict_data/ : including tool scripts for predicting target compounds.
-creat_data.py: create data in pytorch format
-utils.py: include TestbedDataset used by create_data.py to create data, and performance measures.
-training_validation.py: train a GCNFG-DTA model.
 
+models/ : Including stem models and the function group enhance model.
+
+targets_screen/ : Including molecule screening tool scripts.
+
+metrics/test_auroc.py: plot auroc curves for selected models and datasets.
+
+predict_data/ : Including tool scripts for predicting target compounds.
+
+fgp/ : Function group enhance data, run each dataset will create a .pt file by once.
+
+creat_data.py: Create data in pytorch format
+
+utils.py: Including TestbedDataset used by create_data.py to create data, and utils affiliate to main model.
+
+training_validation.py: train the GCNFG-DTA model, or train the Graph-DTA baseline.
+
+training_validation_cv.py: train the GCNFG-DTA model using n-folds cross validation. 
 # Running the model de novo: 
 ## 0. Move KIBA dataset to data/, including data/kiba_test.csv and data/kiba_train.csv
 
@@ -32,12 +45,19 @@ python ./initial/get_dict.py
 
 ## 3. Train a prediction model
 ```
-python training_validation.py 1 6 0
+python training_validation.py 1 6 0 0
 ```
 
-## 4. Predicting affinity scores of molecule-target pairs 
+## 4. Acquiring model metrics 
 Please edit pairs in predict_data/test.txt. Each row with a pair, using _space_ to split SMILES and amino acid sequence. 
 ```
-python training_validation.py 1 6 0
+python training_validation.py 1 6 0 -1
 ```
-please attention parameters '1 6 0' should be same with step 3.
+please note parameters '1 6 0' should be same with step 3.
+
+## 5. Predicting affinity scores of molecule-target pairs 
+Please edit pairs in predict_data/test.txt. Each row with a pair, using _space_ to split SMILES and amino acid sequence. 
+```
+python predicting.py 1 6 0
+```
+please note parameters '1 6 0' should be same with step 3.

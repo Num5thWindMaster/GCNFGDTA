@@ -7,7 +7,7 @@ from torch import Tensor
 from torch_geometric.nn import GCNConv, global_max_pool as gmp
 
 from models.FGP import Prompt_generator
-from utils import load_embedding_from_pkl, match_fg, calculate_fg
+from utils import calculate_fg
 
 
 # GCN based model

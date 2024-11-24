@@ -6,6 +6,7 @@ from random import shuffle
 import torch
 import torch.nn as nn
 from torch.utils.data import ConcatDataset
+
 from models.gat import GATNet, GATFG
 from models.gat_gcn import GAT_GCN, GATGCNFG
 from models.gcn import GCNNet, GCNFG
@@ -13,6 +14,7 @@ from models.ginconv import GINConvNet, GINFG
 from utils import *
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve
 import matplotlib.pyplot as plt
+
 
 # training function at each epoch
 def train(model, device, train_loader, optimizer, epoch):
@@ -62,6 +64,7 @@ def set_seed(seed=6):
 
 datasets = [['kiba', 'bindingdb'][int(sys.argv[1])]]
 modeling = [GINConvNet, GATNet, GAT_GCN, GCNNet, GINFG, GATFG, GATGCNFG, GCNFG][int(sys.argv[2])]
+# modeling = [GCNFG][int(sys.argv[2])]
 model_st = modeling.__name__
 cuda_name = "cuda:0"
 if len(sys.argv) > 3:
@@ -73,7 +76,7 @@ TRAIN_BATCH_SIZE = 512
 TEST_BATCH_SIZE = 512
 LR = 0.0005
 LOG_INTERVAL = 20
-NUM_EPOCHS = 2000
+NUM_EPOCHS = 300
 NUM_CHECKPOINT = 500
 KIBA_THRESHOLD = 12.1
 BINDINGDB_THRESHOLD = 8
@@ -81,8 +84,11 @@ BINDINGDB_THRESHOLD_REVERSE = 16
 threshold = [KIBA_THRESHOLD, BINDINGDB_THRESHOLD][int(sys.argv[1])]
 # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
+n_folds = 5
 SEED = 6
 set_seed(SEED)
+metric_root_dir = './metrics/'
+
 print('Learning rate: ', LR)
 print('Epochs: ', NUM_EPOCHS)
 
@@ -97,15 +103,7 @@ for dataset in datasets:
         train_data = TestbedDataset(root='data', dataset=dataset + '_train')
         test_data = TestbedDataset(root='data', dataset=dataset + '_test')
 
-        train_size = int(0.8 * len(train_data))
-        valid_size = len(train_data) - train_size
-        train_data, valid_data = torch.utils.data.random_split(train_data, [train_size, valid_size])
-        # make data PyTorch mini-batch processing ready
-        train_loader = DataLoader(train_data, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
-        valid_loader = DataLoader(valid_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
         test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
-
-        # training the model
         device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
         model = modeling(dataset=dataset, device=device).to(device)
         loss_fn = nn.MSELoss()
@@ -116,49 +114,62 @@ for dataset in datasets:
         best_test_aupr = 0
         best_test_r2 = 0
         best_epoch = -1
+        best_fold = -1
         model_file_name = 'model_' + model_st + '_' + dataset + '.model'
         result_file_name = 'result_' + model_st + '_' + dataset + '.csv'
         last_metrics_file_name = 'metrics_' + model_st + '_' + dataset + '.csv'
         checkpoint_path = './checkpoints'
         os.makedirs(checkpoint_path, exist_ok=True)
+
+        fold_sizes = [len(train_data) // n_folds] * n_folds
+        fold_sizes[-1] += len(train_data) % n_folds  # address data that is indivisible
+        folds = torch.utils.data.random_split(train_data, fold_sizes)
         if int(sys.argv[4]) == 0: # normally train and evaluate model
-            for epoch in range(NUM_EPOCHS):
-                train(model, device, train_loader, optimizer, epoch + 1)
-                print('predicting for valid data')
-                G, P = predicting(model, device, valid_loader)
-                val = mse(G, P)
-                if val < best_mse:
-                    best_mse = val
-                    best_epoch = epoch + 1
-                    torch.save(model.state_dict(), model_file_name)
-                    print('predicting for test data')
-                    G, P = predicting(model, device, test_loader)
-                    # aupr, aupr_dev =
-                    # r2, r2_dev =
-                    # ret = [rmse(G, P), mse(G, P), pearson(G, P), spearman(G, P), ci(G, P), aupr_std(G, P, threshold, dataset), cal_r2_score(G, P)]
-                    ret = compute_validation_metrics_parallel(G, P, threshold, dataset)
-                    with open(result_file_name, 'w') as f:
-                        f.write(','.join(map(str, ret)))
-                    best_test_mse = ret[1]
-                    best_test_aupr = ret[5][0]
-                    best_test_r2 = ret[6][0]
-                    best_test_ci = ret[4]
-                    print('rmse improved at epoch ', best_epoch, '; best_test_mse, best_test_ci, aupr, r2: ',
-                          best_test_mse,
-                          best_test_ci,
-                          best_test_aupr,
-                          best_test_r2,
-                          model_st, dataset)
-                else:
-                    print(best_test_mse, 'No improvement since epoch ', best_epoch, '; best_test_mse, best_test_ci, aupr, r2: ',
-                          best_test_mse,
-                          best_test_ci,
-                          best_test_aupr,
-                          best_test_r2,
-                          model_st, dataset)
-                    # checkpoint
-                if (epoch+1) % NUM_CHECKPOINT == 0:
-                    torch.save({'model_dict': model.state_dict(), 'dataset:': dataset, 'model': model_st, 'epoch': epoch+1}, '{}/checkpoint_{}_{}_{}'.format(checkpoint_path, model_st, dataset, str(epoch+1)))
+            for i in range(n_folds):
+                # valid fold
+                valid_data = folds[i]
+                # Remaining folds as training set
+                train_data = [folds[j] for j in range(5) if j != i]
+                train_data = ConcatDataset(train_data)
+                # make data PyTorch mini-batch processing ready
+                train_loader = DataLoader(train_data, batch_size=TRAIN_BATCH_SIZE, shuffle=True)
+                valid_loader = DataLoader(valid_data, batch_size=TEST_BATCH_SIZE, shuffle=False)
+
+                for epoch in range(NUM_EPOCHS):
+                    train(model, device, train_loader, optimizer, epoch + 1)
+                    print('predicting for valid data')
+                    G, P = predicting(model, device, valid_loader)
+                    val = mse(G, P)
+                    if val < best_mse:
+                        best_mse = val
+                        best_epoch = epoch + 1
+                        torch.save(model.state_dict(), model_file_name)
+                        print('predicting for test data')
+                        G, P = predicting(model, device, test_loader)
+                        # ret = [rmse(G, P), mse(G, P), pearson(G, P), spearman(G, P), ci(G, P), aupr_std(G, P, threshold, dataset), cal_r2_score(G, P)]
+                        ret = compute_validation_metrics_parallel(G, P, threshold, dataset)
+                        with open(result_file_name, 'w') as f:
+                            f.write(','.join(map(str, ret)))
+                        best_test_mse = ret[1]
+                        best_test_aupr = ret[5][0]
+                        best_test_r2 = ret[6][0]
+                        best_test_ci = ret[4]
+                        print('rmse improved at fold ', i+1, ' epoch ', best_epoch, '; best_test_mse, best_test_ci, aupr, r2: ',
+                              best_test_mse,
+                              best_test_ci,
+                              best_test_aupr,
+                              best_test_r2,
+                              model_st, dataset)
+                    else:
+                        print(best_test_mse, 'No improvement since fold ', i+1, ' epoch ', best_epoch, '; best_test_mse, best_test_ci, aupr, r2: ',
+                              best_test_mse,
+                              best_test_ci,
+                              best_test_aupr,
+                              best_test_r2,
+                              model_st, dataset)
+                        # checkpoint
+                    if (epoch+1) % NUM_CHECKPOINT == 0:
+                        torch.save({'model_dict': model.state_dict(), 'dataset:': dataset, 'model': model_st, 'fold': i, 'epoch': epoch+1}, '{}/checkpoint_{}_{}_{}'.format(checkpoint_path, model_st, dataset, str(epoch+1)))
         elif int(sys.argv[4]) == 1:  # Train and evaluate a classification model
             loss_fn = nn.BCEWithLogitsLoss()  # Binary Cross-Entropy Loss for classification
 
@@ -234,7 +245,10 @@ for dataset in datasets:
         elif int(sys.argv[4]) == 2:
             model.load_state_dict(torch.load(model_file_name, map_location=device))
             G, P = predicting(model, device, test_loader)
-            np.savetxt('./' + 'metric/' + model_st + '_' + dataset.__str__() + '_true', G)
-            np.savetxt('./' + 'metric/' + model_st + '_' + dataset.__str__() + '_pred', P)
+            if not os.path.exists(metric_root_dir):
+                os.makedirs(metric_root_dir)
+            np.savetxt(metric_root_dir + model_st + '_' + dataset.__str__() + '_true', G)
+            np.savetxt(metric_root_dir + model_st + '_' + dataset.__str__() + '_pred', P)
+            print('Saved metrics to ' + metric_root_dir)
         else:
             assert RuntimeError("Unrecognized argument 4")
